@@ -18,15 +18,38 @@ st.caption("Exploring historical wildfire activity across California using NASA 
 # -----------------------------
 # Load data
 # -----------------------------
+
 @st.cache_data
 def load_data():
-    fire = pd.read_parquet("data/processed/fire_data.parquet") 
-    daily = pd.read_parquet("data/processed/daily_grid.parquet")
+    fire = pd.read_parquet(
+        "data/processed/fire_data.parquet",
+        columns=[
+            "acq_date", "sensor", "latitude", "longitude",
+            "confidence_class", "frp"
+        ]
+    )
+
+    daily = pd.read_parquet(
+        "data/processed/daily_grid.parquet",
+        columns=[
+            "acq_date", "sensor", "grid_x", "grid_y",
+            "hotspot_count"
+        ]
+    )
 
     fire["acq_date"] = pd.to_datetime(fire["acq_date"])
     daily["acq_date"] = pd.to_datetime(daily["acq_date"])
 
+    fire["sensor"] = fire["sensor"].astype("category")
+    fire["confidence_class"] = fire["confidence_class"].astype("category")
+    daily["sensor"] = daily["sensor"].astype("category")
+
+    fire["latitude"] = fire["latitude"].astype("float32")
+    fire["longitude"] = fire["longitude"].astype("float32")
+    fire["frp"] = fire["frp"].astype("float32")
+
     return fire, daily
+
 
 fire, daily = load_data()
 
@@ -56,20 +79,28 @@ if len(date_range) == 2:
 else:
     start_date, end_date = min_date, max_date
 
+
 # -----------------------------
 # Filter data
 # -----------------------------
-filtered = fire[
-    (fire["acq_date"].dt.date >= start_date) &
-    (fire["acq_date"].dt.date <= end_date) &
-    (fire["sensor"].isin(sensors))
-]
+start = pd.Timestamp(start_date)
+end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
 
-filtered_daily = daily[
-    (daily["acq_date"].dt.date >= start_date) &
-    (daily["acq_date"].dt.date <= end_date) &
+fire_mask = (
+    (fire["acq_date"] >= start) &
+    (fire["acq_date"] < end) &
+    (fire["sensor"].isin(sensors))
+)
+
+daily_mask = (
+    (daily["acq_date"] >= start) &
+    (daily["acq_date"] < end) &
     (daily["sensor"].isin(sensors))
-]
+)
+
+filtered = fire.loc[fire_mask]
+filtered_daily = daily.loc[daily_mask]
+
 
 # -----------------------------
 # Summary metrics
@@ -133,10 +164,11 @@ calendar_matrix = calendar_data.pivot(
 ).fillna(0)
 
 # Use the same colour scale for both sensors
+
 reference_max = (
-    daily[
-        (daily["acq_date"].dt.date >= start_date) &
-        (daily["acq_date"].dt.date <= end_date)
+    daily.loc[
+        (daily["acq_date"] >= start) &
+        (daily["acq_date"] < end)
     ]
     .groupby("acq_date")["hotspot_count"]
     .sum()
@@ -185,31 +217,40 @@ st.caption(
 st.subheader("Cross-sensor spatial overlap")
 
 # Keep both sensors in this comparison, regardless of the sidebar selection
-comparison_daily = daily[
-    (daily["acq_date"].dt.date >= start_date) &
-    (daily["acq_date"].dt.date <= end_date)
+comparison_daily = daily.loc[
+    (daily["acq_date"] >= start) &
+    (daily["acq_date"] < end)
 ]
-
 # Identify which sensors detected activity in each grid cell on each day
-cell_day_sensors = (
+
+overlap_by_cell = (
     comparison_daily
-    .groupby(["acq_date", "grid_x", "grid_y"])["sensor"]
-    .agg(lambda s: set(s))
+    .groupby(
+        ["acq_date", "grid_x", "grid_y", "sensor"],
+        observed=True
+    )
+    .size()
+    .unstack("sensor", fill_value=0)
+    .reindex(columns=["MODIS", "VIIRS"], fill_value=0)
 )
 
-both_sensors = cell_day_sensors.apply(
-    lambda s: {"MODIS", "VIIRS"}.issubset(s)
+both_sensors = (
+    (overlap_by_cell["MODIS"] > 0) &
+    (overlap_by_cell["VIIRS"] > 0)
 ).sum()
 
-modis_only = cell_day_sensors.apply(
-    lambda s: s == {"MODIS"}
+modis_only = (
+    (overlap_by_cell["MODIS"] > 0) &
+    (overlap_by_cell["VIIRS"] == 0)
 ).sum()
 
-viirs_only = cell_day_sensors.apply(
-    lambda s: s == {"VIIRS"}
+viirs_only = (
+    (overlap_by_cell["VIIRS"] > 0) &
+    (overlap_by_cell["MODIS"] == 0)
 ).sum()
 
-total_cell_days = len(cell_day_sensors)
+total_cell_days = len(overlap_by_cell)
+
 
 col1, col2, col3 = st.columns(3)
 
@@ -247,15 +288,26 @@ st.caption(
 #     )
 # ).reset_index(drop=True) if not filtered.empty else filtered.copy()
 
-map_data = filtered.sample(
-    n=min(len(filtered), 30000),
-    random_state=42
-).copy()
 
-print("Filtered columns:", filtered.columns.tolist())
-print("Map columns:", map_data.columns.tolist())
-print("Map sensor counts:")
-print(map_data["sensor"].value_counts())
+map_data = filtered.sample(
+    n=min(len(filtered), 10000),
+    random_state=42
+)[
+    [
+        "latitude",
+        "longitude",
+        "sensor",
+        "acq_date",
+        "confidence_class",
+        "frp"
+    ]
+].copy()
+
+
+# print("Filtered columns:", filtered.columns.tolist())
+# print("Map columns:", map_data.columns.tolist())
+# print("Map sensor counts:")
+# print(map_data["sensor"].value_counts())
 
 fig_map = px.scatter_map(
     map_data,
